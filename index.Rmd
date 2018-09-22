@@ -1,30 +1,233 @@
 ---
-title: "Practical Machine Learning Course project"
+title: "Coursera - Practical Machine Learning Project"
 author: "Conrad Frank"
-date: "20 September 2018"
+date: "22 September 2018"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+```{r setup, cache = F, echo = F, message = F, warning = F, tidy = F}
+# make this an external chunk that can be included in any file
+options(width = 100)
+library(knitr)
+opts_chunk$set(message = F, error = F, warning = F, comment = NA, cache=TRUE, fig.align = 'center', dpi = 100, tidy = F, cache.path = '.cache/', fig.path = '.fig/')
+
+options(xtable.type = 'html')
+knit_hooks$set(inline = function(x) {
+  if(is.numeric(x)) {
+    round(x, getOption('digits'))
+  } else {
+    paste(as.character(x), collapse = ', ')
+  }
+})
+knit_hooks$set(plot = knitr:::hook_plot_html)
 ```
 
-## R Markdown
+# Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
 
-```{r cars}
-summary(cars)
+In this project, our goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. 
+They are classified as : exactly according to the specification **(Class A)**, throwing the elbows to the front **(Class B)**, lifting the dumbbell only halfway **(Class C)**, lowering the dumbbell only halfway **(Class D)** and throwing the hips to the front **(Class E)**.
+
+Information is derived from url : http://groupware.les.inf.puc-rio.br/har
+
+## Data Processing
+```{r, libraries, warning=FALSE, cache=TRUE}
+library(caret)
+library(rattle)
+library(parallel)
+library(doParallel)
+
+### Settting seed for reproducibility
+set.seed(123456)
+
 ```
 
-## Including Plots
+## Loading data
 
-You can also embed plots, for example:
+Loading training dataset from below url
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r, training, warning=FALSE,message=FALSE, cache=TRUE}
+if(!file.exists("./data")){dir.create("./data")}
+if(!file.exists("./data/pml-training.csv") ){
+  url  <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"  
+  download.file(url , destfile = "./data/pml-training.csv", method = "curl")
+}
+```
+Loading test dataset from below url
+```{r, test, warning=FALSE,message=FALSE, cache=TRUE}
+if(!file.exists("./data/pml-testing.csv") ){
+  url  <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"  
+  download.file(url , destfile = "./data/pml-testing.csv", method = "curl")
+}
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## Reading Data
+```{r, datareading, cache=TRUE}
+training_orginal <- read.csv("./data/pml-training.csv")
+testing_original <- read.csv("./data/pml-testing.csv")
+dim(training_orginal); dim(testing_original)
+```
+
+The goal of this project is to predict the manner in which they did the exercise, i.e using  the *"classe"* variable in the training set to predict the outcome from testing set.
+
+## Cleaning the data
+
+There are 160 variables in training and test dataset, we have to check for covariates that have no variability
+
+```{r, NZV, cache=TRUE}
+var_nzv <- nearZeroVar(training_orginal, saveMetrics = TRUE)
+
+# Number of NZV covariates to be deleted
+sum(var_nzv$nzv==TRUE)
+
+#Creating new training dataset woithout NZV variables
+training_NZV <- training_orginal[var_nzv$nzv==FALSE]
+dim(training_NZV)
+```
+
+Removing columns with NA values and also extraneous columns
+
+```{r,training_new, cache=TRUE}
+
+training_new <- training_NZV[,colSums(is.na(training_NZV))==0]
+training_new <- training_new[ , -c(1:7)]
+dim(training_new)
+```
+
+Using same steps to clean the test dataset
+```{r, testing_new,cache=TRUE}
+testing_NZV <- testing_original[var_nzv$nzv==FALSE]
+testing_new <- testing_NZV[,colSums(is.na(testing_NZV))==0]
+testing_new <- testing_new[ , -c(1:7)]
+dim(testing_new)
+```
+
+New training dataset has 19622 observations with 52 variables and new testing dataset has 20 observations with 52 variables. The outcome variable '**classe**' still present in new training set. 
+
+## Splicing training data set
+
+The test set has to be used in the '*Course Project Prediction Quiz Portion*' with our best machine learning algorithm which has to be predicted. Since our new training set is large and test set very small, we will split the new training set into secondary training (70%) and and test sets (30%) to validate the various ML algorithm predictions. This will help in reducing processing time.
+
+```{r, splicing, cache=TRUE}
+inTrain <- createDataPartition(training_new$classe, p = 0.70, list=F)
+training <- training_new[inTrain,]
+testing <- training_new[-inTrain,]
+dim(training); dim(testing)
+```
+
+## Data Models
+
+We will be building 3 different models using the *'train'* function from **caret** library:
+
+
+**'Classification tree'**  - using method - *rpart* ,
+**'Gradient boosting method'**  - using method - *gbm*  ,
+**'Random forest'**  - using method - *rf*
+
+In order to improve the efficiency of the models and reduce processing time especially for Random Forest  model, we use **'cross-validation'** technique with **5-folds**.
+As mentioned in discussion forum, parallel processing technique will be used using the **parallel** and **doParallel** libraries, to drastically reduce the processing time in RF model.
+
+---
+
+### Train with Classification tree
+
+```{r, ct,cache=TRUE}
+fitControl <- trainControl(method = "cv",number = 5,allowParallel = TRUE)
+modelct <- train(classe~., data=training,trControl = fitControl, method = "rpart")
+
+#display modeel_CT
+fancyRpartPlot(modelct$finalModel)
+
+predict_ct <- predict(modelct,testing)
+confMat_ct <- confusionMatrix(testing$classe,predict_ct)
+
+#displaying confusion matrix and accuracy
+confMat_ct$table
+
+confMat_ct$overall[1]
+```
+
+Accuracy for this model is very less (about 49%), the exercise outcome *classe* canot be predicted very well by the other predictors.
+
+---
+
+
+### Train with Gradient boosting method
+
+```{r, gbm, cache=TRUE }
+modelgbm <- train(classe~., data=training,trControl = fitControl, method = "gbm", verbose = FALSE)
+
+plot(modelgbm)
+
+predict_gbm <- predict(modelgbm,testing)
+confMat_gbm <- confusionMatrix(testing$classe,predict_gbm)
+
+#displaying confusion matrix and accuracy
+confMat_gbm$table
+
+confMat_gbm$overall[1]
+```
+
+Getting very good accuracy 96% using cross-validation with 5-folds. Let us check with RF to see if the accuracy can be improved.
+
+
+---
+
+
+### Train with Random Forest method
+
+```{r, rf, cache=TRUE }
+
+#setting up for parallel processing
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+
+modelrf <- train(classe~., data=training,trControl = fitControl, method = "rf")
+
+stopCluster(cluster)
+registerDoSEQ()
+
+plot(modelrf, main = "Accuracy of RF by number of predictors")
+
+predict_rf <- predict(modelrf,testing)
+confMat_rf <- confusionMatrix(testing$classe,predict_rf)
+
+
+#displaying confusion matrix and accuracy
+confMat_rf$table
+
+confMat_rf$overall[1]
+
+#displaying the important variables
+MostImpVar <- varImp(modelrf)
+MostImpVar
+```
+
+Getting improved accuracy **99.4%** using cross-validation with 5-folds. We can also observe that with 27 predictors it gives the maximum accuracy, no improvement in accuracy beyond 27 predictors
+
+# Conclusion
+
+Random Forest is giving >99% accuracy, we will use this methods to predict the values of classe for the original test data set.
+
+The outcome will used as submission in '*Course Project Prediction Quiz Portion*'
+
+```{r, final_testing, cache=TRUE}
+
+#predict using RF model
+predict_final_rf <- predict(modelrf,testing_new)
+predict_final_rf
+
+```
+
+
+
+
+
+
+
+
+
